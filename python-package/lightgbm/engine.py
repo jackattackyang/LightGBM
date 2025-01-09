@@ -291,6 +291,11 @@ def train(
     callbacks_after_iter_set = callbacks_set - callbacks_before_iter_set
     callbacks_before_iter = sorted(callbacks_before_iter_set, key=attrgetter("order"))
     callbacks_after_iter = sorted(callbacks_after_iter_set, key=attrgetter("order"))
+    
+    has_overfit_tolerance = (
+        "early_stopping_overfit_atol" in params
+        or any(getattr(cb, "overfit_atol", 0.0) > 0.0 or getattr(cb, "overfit_rtol", 0.0) > 0.0 for cb in callbacks_after_iter)
+    )
 
     # construct booster
     try:
@@ -324,7 +329,7 @@ def train(
         evaluation_result_list: List[_LGBM_BoosterEvalMethodResultType] = []
         # check evaluation result.
         if valid_sets is not None:
-            if is_valid_contain_train:
+            if is_valid_contain_train or has_overfit_tolerance:
                 evaluation_result_list.extend(booster.eval_train(feval))
             evaluation_result_list.extend(booster.eval_valid(feval))
         try:

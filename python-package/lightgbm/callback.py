@@ -284,6 +284,8 @@ class _EarlyStoppingCallback:
         first_metric_only: bool = False,
         verbose: bool = True,
         min_delta: Union[float, List[float]] = 0.0,
+        overfit_atol: Union[float, List[float]] = 0.0,
+        overfit_rtol: Union[float, List[float]] = 0.0,
     ) -> None:
         self.enabled = _should_enable_early_stopping(stopping_rounds)
 
@@ -294,6 +296,8 @@ class _EarlyStoppingCallback:
         self.first_metric_only = first_metric_only
         self.verbose = verbose
         self.min_delta = min_delta
+        self.overfit_atol = overfit_atol
+        self.overfit_rtol = overfit_rtol
 
         self._reset_storages()
 
@@ -309,6 +313,12 @@ class _EarlyStoppingCallback:
 
     def _lt_delta(self, curr_score: float, best_score: float, delta: float) -> bool:
         return curr_score < best_score - delta
+    
+    def _lt_atol(self, train_score: float, valid_score: float, tolerance: float) -> bool:
+        return abs(train_score - valid_score) < tolerance
+    
+    def _lt_rtol(self, train_score: float, valid_score: float, tolerance: float) -> bool:
+        return (abs(train_score - valid_score) / train_score) < tolerance
 
     def _is_train_set(self, dataset_name: str, env: CallbackEnv) -> bool:
         """Check, by name, if a given Dataset is the training data."""
@@ -409,11 +419,25 @@ class _EarlyStoppingCallback:
                 "early_stopping() callback enabled but no evaluation results found. This is a probably bug in LightGBM. "
                 "Please report it at https://github.com/microsoft/LightGBM/issues"
             )
+        train_metrics = {}
         # self.best_score_list is initialized to an empty list
         first_time_updating_best_score_list = self.best_score_list == []
         for i in range(len(env.evaluation_result_list)):
             dataset_name, metric_name, metric_value, *_ = env.evaluation_result_list[i]
-            if first_time_updating_best_score_list or self.cmp_op[i](metric_value, self.best_score[i]):
+            is_train_set = False
+            if self._is_train_set(dataset_name=dataset_name, env=env):
+                is_train_set = True
+                train_metrics[metric_name] = metric_value
+            
+            # Track trigger conditions
+            min_delta_pass = False
+            overfit_tol_pass = False
+            if self.cmp_op[i](metric_value, self.best_score[i]):
+                min_delta_pass = True
+            if self._lt_atol(train_metrics[metric_name], metric_value, self.overfit_atol) or self._lt_rtol(train_metrics[metric_name], metric_value, self.overfit_rtol):
+                overfit_tol_pass = True
+            
+            if first_time_updating_best_score_list or (min_delta_pass and overfit_tol_pass):
                 self.best_score[i] = metric_value
                 self.best_iter[i] = env.iteration
                 if first_time_updating_best_score_list:
@@ -422,17 +446,15 @@ class _EarlyStoppingCallback:
                     self.best_score_list[i] = env.evaluation_result_list
             if self.first_metric_only and self.first_metric != metric_name:
                 continue  # use only the first metric for early stopping
-            if self._is_train_set(
-                dataset_name=dataset_name,
-                env=env,
-            ):
+            if is_train_set:
                 continue  # train data for lgb.cv or sklearn wrapper (underlying lgb.train)
-            elif env.iteration - self.best_iter[i] >= self.stopping_rounds:
+            elif env.iteration - self.best_iter[i] >= self.stopping_rounds or not overfit_tol_pass:
                 if self.verbose:
                     eval_result_str = "\t".join(
                         [_format_eval_result(x, show_stdv=True) for x in self.best_score_list[i]]
                     )
-                    _log_info(f"Early stopping, best iteration is:\n[{self.best_iter[i] + 1}]\t{eval_result_str}")
+                    tol_msg = "" if overfit_tol_pass else "overfit tolerance breached, " 
+                    _log_info(f"Early stopping, {tol_msg}best iteration is:\n[{self.best_iter[i] + 1}]\t{eval_result_str}")
                     if self.first_metric_only:
                         _log_info(f"Evaluated only: {metric_name}")
                 raise EarlyStopException(self.best_iter[i], self.best_score_list[i])
@@ -456,6 +478,8 @@ def early_stopping(
     first_metric_only: bool = False,
     verbose: bool = True,
     min_delta: Union[float, List[float]] = 0.0,
+    overfit_atol: Union[float, List[float]] = 0.0,
+    overfit_rtol: Union[float, List[float]] = 0.0,
 ) -> _EarlyStoppingCallback:
     """Create a callback that activates early stopping.
 
@@ -495,4 +519,6 @@ def early_stopping(
         first_metric_only=first_metric_only,
         verbose=verbose,
         min_delta=min_delta,
+        overfit_atol=overfit_atol,
+        overfit_rtol=overfit_rtol,
     )
