@@ -322,8 +322,15 @@ class _EarlyStoppingCallback:
         factor = 1 if is_increasing_metric else -1
         train_valid_gap = factor * (train_score - valid_score)
         if use_relative:
+            #TODO: what if train_score is zero
             train_valid_gap /= train_score
         return train_valid_gap > tolerance
+    
+    def _mk_tolerance_op(self, is_increasing_metric: bool, tolerance: float, use_relative: bool) -> Callable[[float, float], bool]:
+        # if tolerance value is None, disable tolerance check
+        if tolerance is None:
+            return lambda train_score, valid_score: False
+        return partial(self._gt_tolerance, is_increasing_metric=is_increasing_metric, tolerance=tolerance, use_relative=use_relative)
 
     def _is_train_set(self, dataset_name: str, env: CallbackEnv) -> bool:
         """Check, by name, if a given Dataset is the training data."""
@@ -411,7 +418,7 @@ class _EarlyStoppingCallback:
                     _log_info(f"Using only {self.overfit_atol[0]} as early stopping overfit_atol.")
                 atols = self.overfit_atol * n_datasets
         elif self.overfit_atol is None:
-            atols = [True] * n_datasets * n_metrics
+            atols = [None] * n_datasets * n_metrics
         else:
             if self.overfit_atol < 0:
                 raise ValueError("Early stopping overfit_atol must be non-negative.")
@@ -439,7 +446,7 @@ class _EarlyStoppingCallback:
                     _log_info(f"Using only {self.overfit_rtol[0]} as early stopping overfit_rtol.")
                 rtols = self.overfit_rtol * n_datasets
         elif self.overfit_rtol is None:
-            rtols = [True] * n_datasets * n_metrics
+            rtols = [None] * n_datasets * n_metrics
         else:
             if self.overfit_rtol < 0:
                 raise ValueError("Early stopping overfit_rtol must be non-negative.")
@@ -457,13 +464,13 @@ class _EarlyStoppingCallback:
             if eval_ret[3]:  # greater is better
                 self.best_score.append(float("-inf"))
                 self.cmp_op.append(partial(self._gt_delta, delta=delta))
-                self.cmp_op_atol.append(partial(self._gt_tolerance, is_increasing_metric=True, tolerance=atol, use_relative=False))
-                self.cmp_op_rtol.append(partial(self._gt_tolerance, is_increasing_metric=True, tolerance=rtol, use_relative=True))
+                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=atol, use_relative=False))
+                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=rtol, use_relative=True))
             else:
                 self.best_score.append(float("inf"))
                 self.cmp_op.append(partial(self._lt_delta, delta=delta))
-                self.cmp_op_atol.append(partial(self._gt_tolerance, is_increasing_metric=False, tolerance=atol, use_relative=False))
-                self.cmp_op_rtol.append(partial(self._gt_tolerance, is_increasing_metric=False, tolerance=rtol, use_relative=True))
+                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=atol, use_relative=False))
+                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=rtol, use_relative=True))
 
     def _final_iteration_check(self, *, env: CallbackEnv, metric_name: str, i: int) -> None:
         if env.iteration == env.end_iteration - 1:

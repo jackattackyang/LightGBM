@@ -293,7 +293,7 @@ def train(
     callbacks_after_iter = sorted(callbacks_after_iter_set, key=attrgetter("order"))
     
     has_overfit_tolerance = (
-        "early_stopping_overfit_atol" in params
+        "early_stopping_overfit_atol" in params or "early_stopping_overfit_rtol" in params
         or any(getattr(cb, "overfit_atol", None) is not None 
                or getattr(cb, "overfit_rtol", None) is not None for cb in callbacks_after_iter)
     )
