@@ -294,7 +294,8 @@ def train(
     
     has_overfit_tolerance = (
         "early_stopping_overfit_atol" in params
-        or any(getattr(cb, "overfit_atol", 0.0) > 0.0 or getattr(cb, "overfit_rtol", 0.0) > 0.0 for cb in callbacks_after_iter)
+        or any(getattr(cb, "overfit_atol", None) is not None 
+               or getattr(cb, "overfit_rtol", None) is not None for cb in callbacks_after_iter)
     )
 
     # construct booster
