@@ -316,21 +316,50 @@ class _EarlyStoppingCallback:
 
     def _lt_delta(self, curr_score: float, best_score: float, delta: float) -> bool:
         return curr_score < best_score - delta
-    
-    def _gt_tolerance(self, train_score: float, valid_score: float, is_increasing_metric: bool, tolerance: float, use_relative: bool) -> bool:
-        # allow valid to be better than train
+
+    def _gt_tolerance(self, train_score: float, valid_score: float, is_increasing_metric: bool, tolerance: float, use_relative: bool, epsilon: float = 1e-10) -> bool:
+        # abs() not used to allow valid to have better performance than train
         factor = 1 if is_increasing_metric else -1
         train_valid_gap = factor * (train_score - valid_score)
         if use_relative:
-            #TODO: what if train_score is zero
-            train_valid_gap /= train_score
+            # TODO: what if train_score is zero
+            train_valid_gap /= (train_score + epsilon)
         return train_valid_gap > tolerance
-    
+
     def _mk_tolerance_op(self, is_increasing_metric: bool, tolerance: float, use_relative: bool) -> Callable[[float, float], bool]:
-        # if tolerance value is None, disable tolerance check
-        if tolerance is None:
+        if tolerance is None:  # if tolerance value is None, disable tolerance check
             return lambda train_score, valid_score: False
         return partial(self._gt_tolerance, is_increasing_metric=is_increasing_metric, tolerance=tolerance, use_relative=use_relative)
+
+    def _validate_broadcast_comparisons(self, cmp_val: Union[None, float, List[float]], cmp_name: str, n_datasets: int, n_metrics: int, allow_none: bool = False):
+        if cmp_val is None:
+            if allow_none:
+                return [None] * n_datasets * n_metrics
+            else:
+                raise ValueError(f"{cmp_name} cannot be None.")
+        if isinstance(cmp_val, list):
+            if not all(t >= 0 for t in cmp_val):
+                raise ValueError(f"Values for early stopping {cmp_name} must be non-negative.")
+            if len(cmp_val) == 0:
+                if self.verbose:
+                    _log_info(f"Disabling {cmp_name} for early stopping.")
+                return [None] * n_datasets * n_metrics if allow_none else [0.0] * n_datasets * n_metrics
+            elif len(cmp_val) == 1:   
+                if self.verbose:
+                    _log_info(f"Using {cmp_val[0]} as {cmp_name} for all metrics.")
+                return cmp_val * n_datasets * n_metrics
+            else:
+                if len(cmp_val) != n_metrics:
+                    raise ValueError(f"Must provide a single value for {cmp_name} or as many as metrics.")
+                if self.first_metric_only and self.verbose:
+                    _log_info(f"Using only {cmp_val[0]} as early stopping {cmp_name}.")
+                return cmp_val * n_datasets
+        else:
+            if cmp_val < 0:
+                raise ValueError(f"Early stopping {cmp_name} must be non-negative.")
+            if cmp_val > 0 and n_metrics > 1 and not self.first_metric_only and self.verbose:
+                _log_info(f"Using {cmp_val} as {cmp_name} for all metrics.")
+            return [cmp_val] * n_datasets * n_metrics
 
     def _is_train_set(self, dataset_name: str, env: CallbackEnv) -> bool:
         """Check, by name, if a given Dataset is the training data."""
@@ -376,101 +405,32 @@ class _EarlyStoppingCallback:
 
         n_metrics = len({m[1] for m in env.evaluation_result_list})
         n_datasets = len(env.evaluation_result_list) // n_metrics
-        if isinstance(self.min_delta, list):
-            if not all(t >= 0 for t in self.min_delta):
-                raise ValueError("Values for early stopping min_delta must be non-negative.")
-            if len(self.min_delta) == 0:
-                if self.verbose:
-                    _log_info("Disabling min_delta for early stopping.")
-                deltas = [0.0] * n_datasets * n_metrics
-            elif len(self.min_delta) == 1:
-                if self.verbose:
-                    _log_info(f"Using {self.min_delta[0]} as min_delta for all metrics.")
-                deltas = self.min_delta * n_datasets * n_metrics
-            else:
-                if len(self.min_delta) != n_metrics:
-                    raise ValueError("Must provide a single value for min_delta or as many as metrics.")
-                if self.first_metric_only and self.verbose:
-                    _log_info(f"Using only {self.min_delta[0]} as early stopping min_delta.")
-                deltas = self.min_delta * n_datasets
-        else:
-            if self.min_delta < 0:
-                raise ValueError("Early stopping min_delta must be non-negative.")
-            if self.min_delta > 0 and n_metrics > 1 and not self.first_metric_only and self.verbose:
-                _log_info(f"Using {self.min_delta} as min_delta for all metrics.")
-            deltas = [self.min_delta] * n_datasets * n_metrics
+        deltas = self._validate_broadcast_comparisons(self.min_delta, "min_delta", n_datasets, n_metrics, allow_none=False)
+        atols = self._validate_broadcast_comparisons(self.overfit_atol, "overfit_atol", n_datasets, n_metrics, allow_none=True)
+        rtols = self._validate_broadcast_comparisons(self.overfit_rtol, "overfit_rtol", n_datasets, n_metrics, allow_none=True)
+
+        if self.overfit_check and not (len(env.evaluation_result_list) == len(deltas) == len(atols) == len(rtols)):
+            raise RuntimeError("Early stopping, evaluation_result_list, min_delta, overfit_atol, and overfit_rtol must all broadcast to the same length.")
         
-        if isinstance(self.overfit_atol, list):
-            if not all(t >= 0 for t in self.min_delta):
-                raise ValueError("Values for early stopping overfit_atol must be non-negative.")
-            if len(self.overfit_atol) == 0:
+        if self.overfit_check:
+            if all(a is None for a in atols) and all(r is None for r in rtols):
                 if self.verbose:
-                    _log_info("Disabling overfit_atol for early stopping.")
+                    _log_info("Disabling overfit checking for early stopping.")
                 self.overfit_check = False
-            elif len(self.overfit_atol) == 1:
-                if self.verbose:
-                    _log_info(f"Using {self.overfit_atol[0]} as overfit_atol for all metrics.")
-                atols = self.overfit_atol * n_datasets * n_metrics
-            else:
-                if len(self.overfit_atol) != n_metrics:
-                    raise ValueError("Must provide a single value for min_delta or as many as metrics.")
-                if self.first_metric_only and self.verbose:
-                    _log_info(f"Using only {self.overfit_atol[0]} as early stopping overfit_atol.")
-                atols = self.overfit_atol * n_datasets
-        elif self.overfit_atol is None:
-            atols = [None] * n_datasets * n_metrics
-        else:
-            if self.overfit_atol < 0:
-                raise ValueError("Early stopping overfit_atol must be non-negative.")
-            elif self.overfit_atol == 0:
-                _log_info(f"Early stopping overfit_atol is zero. Valid performance must be better than train performance")
-            if self.overfit_atol > 0 and n_metrics > 1 and not self.first_metric_only and self.verbose:
-                _log_info(f"Using {self.overfit_atol} as overfit_atol for all metrics.")
-            atols = [self.overfit_atol] * n_datasets * n_metrics
-        
-        if isinstance(self.overfit_rtol, list):
-            if not all(t >= 0 for t in self.min_delta):
-                raise ValueError("Values for early stopping overfit_rtol must be non-negative.")
-            if len(self.overfit_rtol) == 0:
-                if self.verbose:
-                    _log_info("Disabling overfit_rtol for early stopping.")
-                self.overfit_check = False
-            elif len(self.overfit_rtol) == 1:
-                if self.verbose:
-                    _log_info(f"Using {self.overfit_rtol[0]} as overfit_rtol for all metrics.")
-                rtols = self.overfit_rtol * n_datasets * n_metrics
-            else:
-                if len(self.overfit_rtol) != n_metrics:
-                    raise ValueError("Must provide a single value for min_delta or as many as metrics.")
-                if self.first_metric_only and self.verbose:
-                    _log_info(f"Using only {self.overfit_rtol[0]} as early stopping overfit_rtol.")
-                rtols = self.overfit_rtol * n_datasets
-        elif self.overfit_rtol is None:
-            rtols = [None] * n_datasets * n_metrics
-        else:
-            if self.overfit_rtol < 0:
-                raise ValueError("Early stopping overfit_rtol must be non-negative.")
-            elif self.overfit_rtol == 0:
-                _log_info(f"Early stopping overfit_rtol is zero. Valid performance must be better than train performance")
-            if self.overfit_rtol > 0 and n_metrics > 1 and not self.first_metric_only and self.verbose:
-                _log_info(f"Using {self.overfit_rtol} as overfit_rtol for all metrics.")
-            rtols = [self.overfit_rtol] * n_datasets * n_metrics
 
         self.first_metric = first_metric_name
-        if self.overfit_check and not (len(deltas) == len(atols) == len(rtols)):
-            raise RuntimeError("min_delta, overfit_atol, overfit_rtol have different list length")
-        for eval_ret, delta, atol, rtol in zip(env.evaluation_result_list, deltas, atols, rtols):
+        for i, eval_ret in enumerate(env.evaluation_result_list):
             self.best_iter.append(0)
             if eval_ret[3]:  # greater is better
                 self.best_score.append(float("-inf"))
-                self.cmp_op.append(partial(self._gt_delta, delta=delta))
-                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=atol, use_relative=False))
-                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=rtol, use_relative=True))
+                self.cmp_op.append(partial(self._gt_delta, delta=deltas[i]))
+                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=atols[i], use_relative=False))
+                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=True, tolerance=rtols[i], use_relative=True))
             else:
                 self.best_score.append(float("inf"))
-                self.cmp_op.append(partial(self._lt_delta, delta=delta))
-                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=atol, use_relative=False))
-                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=rtol, use_relative=True))
+                self.cmp_op.append(partial(self._lt_delta, delta=deltas[i]))
+                self.cmp_op_atol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=atols[i], use_relative=False))
+                self.cmp_op_rtol.append(self._mk_tolerance_op(is_increasing_metric=False, tolerance=rtols[i], use_relative=True))
 
     def _final_iteration_check(self, *, env: CallbackEnv, metric_name: str, i: int) -> None:
         if env.iteration == env.end_iteration - 1:
@@ -497,21 +457,23 @@ class _EarlyStoppingCallback:
         # self.best_score_list is initialized to an empty list
         first_time_updating_best_score_list = self.best_score_list == []
         for i in range(len(env.evaluation_result_list)):
-            dataset_name, metric_name, metric_value, is_increasing_metric = env.evaluation_result_list[i]
+            dataset_name, metric_name, metric_value, *_ = env.evaluation_result_list[i]
             is_train_set = False
             if self._is_train_set(dataset_name=dataset_name, env=env):
                 is_train_set = True
                 train_metrics[metric_name] = metric_value
-            
-            # Track early stopping conditions
+
+            # track early stopping conditions
             min_delta_pass = False
-            overfit_tol_pass = True  
+            overfit_tol_pass = True
             if self.cmp_op[i](metric_value, self.best_score[i]):
                 min_delta_pass = True
-            if self.overfit_check and metric_name in train_metrics:
+            if self.overfit_check:
+                if metric_name not in train_metrics:
+                    raise ValueError(f"Early stopping overfit check enabled but {metric_name} not found in `train_metrics`")
                 if self.cmp_op_atol[i](train_metrics[metric_name], metric_value) or self.cmp_op_rtol[i](train_metrics[metric_name], metric_value):
                     overfit_tol_pass = False
-            
+
             if first_time_updating_best_score_list or (min_delta_pass and overfit_tol_pass):
                 self.best_score[i] = metric_value
                 self.best_iter[i] = env.iteration
@@ -553,8 +515,8 @@ def early_stopping(
     first_metric_only: bool = False,
     verbose: bool = True,
     min_delta: Union[float, List[float]] = 0.0,
-    overfit_atol: Union[float, List[float]] = 0.0,
-    overfit_rtol: Union[float, List[float]] = 0.0,
+    overfit_atol: Union[None, float, List[float]] = None,
+    overfit_rtol: Union[None, float, List[float]] = None,
 ) -> _EarlyStoppingCallback:
     """Create a callback that activates early stopping.
 
